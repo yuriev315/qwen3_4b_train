@@ -1,0 +1,755 @@
+"""
+SFT training (LoRA) for Qwen3-4B on multi-turn chat data.
+
+Launch (recommended — 2× GPU DDP):
+  cd sft
+  ./launch_ddp.sh
+
+Single GPU:
+  python sft_train_01
+"""
+
+import gc
+import json
+import os
+import re
+import shutil
+import time
+from dataclasses import replace
+from pathlib import Path
+
+os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("OMP_NUM_THREADS", "8")
+os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+os.environ.setdefault("USE_LIBUV", "0")
+
+import torch
+from accelerate import PartialState
+from accelerate.state import DistributedType
+from datasets import Dataset
+from peft import LoraConfig, PeftModel, get_peft_model
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from trl import SFTConfig, SFTTrainer
+
+if torch.cuda.is_available():
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.set_float32_matmul_precision("high")
+
+STATE = PartialState()
+
+_CHAT_TURN_RE = re.compile(
+    r"<\|im_start\|>(system|user|assistant)\n(.*?)(?:<\|im_end\|>|<\|redacted_im_end\|>)",
+    re.DOTALL,
+)
+
+MODEL_NAME = "../checkpoint/king/arboshelper/albedo-qwen3-4b-2-5-final"
+SFT_DATA_PATH = Path("../data/sft_data.jsonl")
+SFT_CACHE_DIR = Path("cache/sft/dataset_cache")
+SFT_CACHE_META = SFT_CACHE_DIR / "cache_meta.json"
+TOKENIZED_CACHE_DIR = SFT_CACHE_DIR / "tokenized"
+TOKENIZED_CACHE_META = TOKENIZED_CACHE_DIR / "cache_meta.json"
+TOKENIZED_CACHE_DONE = TOKENIZED_CACHE_DIR / ".done"
+SFT_CACHE_DONE = SFT_CACHE_DIR / ".done"
+LEGACY_CACHE_DIRS = (
+    Path("cache/sft_text_cache"),
+    Path("cache/sft_tokenized"),
+    Path("data/sft_text_cache"),
+    Path("data/sft_tokenized"),
+)
+OUTPUT_DIR = Path("../checkpoint/sft")
+
+# ~4.3k multi-turn chat examples | Qwen3-4B LoRA | 8k context | 2×4090 (24 GB each)
+#
+# completion_only_loss=True: loss only on the LAST assistant turn (scored response).
+# Mid-turn assistant messages stay in prompt context with no loss.
+# effective batch = 1 × 4 grad_accum × 2 GPUs = 8
+HYPERPARAMS = {
+    "max_length": 8192,
+    "per_device_batch": 2,
+    "per_device_eval_batch": 2,
+    "grad_accum": 4,
+    "num_epochs": 1,
+    "learning_rate": 5e-6,
+    "warmup_ratio": 0.05,
+    "weight_decay": 0.01,
+    "max_grad_norm": 1.0,
+    "lora_r": 8,
+    "lora_alpha": 16,
+    "lora_dropout": 0.05,
+    "eval_steps": 50,
+    "save_steps": 50,
+    "save_total_limit": 3,
+    "logging_steps": 10,
+    "dataset_num_proc": min(8, os.cpu_count() or 4),
+    "dataloader_num_workers": 0,
+    "assistant_only_loss": False,
+    "completion_only_loss": True,
+    "packing": False,
+    "use_liger_kernel": False,  # incompatible with PEFT + DDP (causes rank param mismatch)
+    "loss_type": "chunked_nll",  # avoids materializing [seq, vocab] logits at 8k context
+    "activation_offloading": True,
+}
+
+
+def _log(*args, **kwargs) -> None:
+    kwargs.setdefault("flush", True)
+    if STATE.is_main_process:
+        print(*args, **kwargs)
+
+
+def _log_all(*args, **kwargs) -> None:
+    kwargs.setdefault("flush", True)
+    print(f"[rank {STATE.process_index}]", *args, **kwargs)
+
+
+def _source_fingerprint(path: Path) -> dict:
+    stat = path.stat()
+    return {"path": str(path), "mtime": stat.st_mtime, "size": stat.st_size}
+
+
+def _cache_is_valid(meta_path: Path, source_path: Path, max_length: int) -> bool:
+    if not meta_path.is_file() or not SFT_CACHE_DIR.is_dir():
+        return False
+    if not (SFT_CACHE_DIR / "dataset_info.json").is_file():
+        return False
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    return (
+        meta.get("source") == _source_fingerprint(source_path)
+        and meta.get("max_length") == max_length
+        and meta.get("columns") == ["prompt", "completion"]
+        and meta.get("loss_mode") == "last_completion_only"
+    )
+
+
+def _write_cache_meta(source_path: Path, max_length: int, num_rows: int) -> None:
+    SFT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    meta = {
+        "source": _source_fingerprint(source_path),
+        "max_length": max_length,
+        "num_rows": num_rows,
+        "columns": ["prompt", "completion"],
+        "loss_mode": "last_completion_only",
+    }
+    SFT_CACHE_META.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    SFT_CACHE_DONE.write_text("ok", encoding="utf-8")
+
+
+def _remove_legacy_caches() -> None:
+    for legacy_dir in LEGACY_CACHE_DIRS:
+        if legacy_dir.exists():
+            _log(f"Removing legacy cache: {legacy_dir}")
+            shutil.rmtree(legacy_dir)
+
+
+def _parse_chat_text(text: str) -> list[dict[str, str]] | None:
+    messages = [
+        {"role": role, "content": content.strip()}
+        for role, content in _CHAT_TURN_RE.findall(text)
+    ]
+    if not messages or not any(msg["role"] == "assistant" for msg in messages):
+        return None
+    return messages
+
+
+def _messages_to_prompt_completion(
+    messages: list[dict[str, str]],
+) -> tuple[list[dict[str, str]], list[dict[str, str]]] | None:
+    """Split so only the final assistant turn is the scored completion."""
+    if not messages or messages[-1]["role"] != "assistant":
+        return None
+    completion = [{"role": "assistant", "content": messages[-1]["content"]}]
+    prompt = messages[:-1]
+    if not prompt:
+        return None
+    return prompt, completion
+
+
+def _prompt_completion_token_length(
+    tokenizer,
+    prompt: list[dict[str, str]],
+    completion: list[dict[str, str]],
+) -> int:
+    rendered = tokenizer.apply_chat_template(
+        prompt + completion,
+        tokenize=False,
+        add_generation_prompt=False,
+    )
+    return len(tokenizer.encode(rendered, add_special_tokens=False))
+
+
+def _fit_prompt_completion_to_max_length(
+    tokenizer,
+    prompt: list[dict[str, str]],
+    completion: list[dict[str, str]],
+    max_length: int,
+) -> tuple[list[dict[str, str]], list[dict[str, str]]] | None:
+    """Drop oldest prompt turns first; keep the last (scored) assistant completion."""
+    working_prompt = list(prompt)
+    system_prefix: list[dict[str, str]] = []
+    if working_prompt and working_prompt[0]["role"] == "system":
+        system_prefix = [working_prompt.pop(0)]
+
+    while True:
+        candidate_prompt = system_prefix + working_prompt
+        if _prompt_completion_token_length(tokenizer, candidate_prompt, completion) <= max_length:
+            return candidate_prompt, completion
+        if not working_prompt:
+            break
+        working_prompt.pop(0)
+
+    candidate_prompt = system_prefix + working_prompt
+    rendered = tokenizer.apply_chat_template(
+        candidate_prompt + completion,
+        tokenize=False,
+        add_generation_prompt=False,
+    )
+    truncated = _left_truncate_text(tokenizer, rendered, max_length)
+    if not truncated.strip():
+        return None
+    parsed = _parse_chat_text(truncated)
+    if parsed is None:
+        return None
+    return _messages_to_prompt_completion(parsed)
+
+
+def _left_truncate_text(tokenizer, text: str, max_length: int) -> str:
+    ids = tokenizer.encode(text, add_special_tokens=False, truncation=True, max_length=max_length)
+    return tokenizer.decode(ids, skip_special_tokens=False)
+
+
+def load_data(path: Path, tokenizer, max_length: int) -> Dataset:
+    kept = []
+    dropped_format = 0
+    truncated_count = 0
+    max_seen = 0
+    all_rows = 0
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            all_rows += 1
+            record = json.loads(line)
+            messages = record.get("messages") if isinstance(record, dict) else None
+            if not isinstance(messages, list):
+                dropped_format += 1
+                continue
+
+            split = _messages_to_prompt_completion(messages)
+            if split is None:
+                dropped_format += 1
+                continue
+            prompt, completion = split
+
+            raw_len = _prompt_completion_token_length(tokenizer, prompt, completion)
+            max_seen = max(max_seen, raw_len)
+            fitted = _fit_prompt_completion_to_max_length(tokenizer, prompt, completion, max_length)
+            if fitted is None:
+                dropped_format += 1
+                continue
+            prompt, completion = fitted
+            if raw_len > max_length:
+                truncated_count += 1
+            kept.append({"prompt": prompt, "completion": completion})
+
+    _log(
+        f"Dataset: {all_rows} all, {len(kept)} kept, {dropped_format} bad format, "
+        f"{truncated_count} truncated to max_length ({max_length}), longest={max_seen} tokens"
+    )
+    return Dataset.from_list(kept)
+
+
+def _wait_for_sft_cache(source_path: Path, max_length: int, timeout_s: int = 3600) -> None:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if _cache_is_valid(SFT_CACHE_META, source_path, max_length):
+            return
+        time.sleep(2)
+    raise TimeoutError(f"Timed out waiting for dataset cache at {SFT_CACHE_DIR}")
+
+
+def load_or_build_dataset(tokenizer, max_length: int) -> Dataset:
+    _remove_legacy_caches()
+
+    if not SFT_DATA_PATH.is_file():
+        raise FileNotFoundError(f"SFT data not found: {SFT_DATA_PATH}")
+
+    if _cache_is_valid(SFT_CACHE_META, SFT_DATA_PATH, max_length):
+        _log(f"Loading cached dataset from {SFT_CACHE_DIR}")
+        return Dataset.load_from_disk(SFT_CACHE_DIR)
+
+    if STATE.is_main_process:
+        if SFT_CACHE_DIR.exists():
+            _log("SFT source changed or cache invalid; rebuilding dataset cache")
+            shutil.rmtree(SFT_CACHE_DIR)
+
+        dataset = load_data(SFT_DATA_PATH, tokenizer, max_length)
+        dataset.save_to_disk(SFT_CACHE_DIR)
+        _write_cache_meta(SFT_DATA_PATH, max_length, len(dataset))
+        _log(f"Saved dataset cache to {SFT_CACHE_DIR}")
+    else:
+        _log_all("Waiting for rank 0 to build dataset cache...")
+        _wait_for_sft_cache(SFT_DATA_PATH, max_length)
+
+    STATE.wait_for_everyone()
+    return Dataset.load_from_disk(SFT_CACHE_DIR)
+
+
+def _latest_checkpoint(output_dir: Path) -> str | None:
+    checkpoints = list(output_dir.glob("checkpoint-*"))
+    if not checkpoints:
+        return None
+    return str(max(checkpoints, key=lambda p: int(p.name.split("-")[1])).resolve())
+
+
+def _resolve_attn_implementation() -> str:
+    try:
+        import flash_attn  # noqa: F401
+
+        return "flash_attention_2"
+    except ImportError:
+        _log("flash_attn not found; falling back to sdpa attention")
+        return "sdpa"
+
+
+def _resolve_use_liger_kernel(requested: bool) -> bool:
+    if not requested:
+        return False
+    if _is_distributed():
+        _log("Liger disabled: PEFT + DDP is unstable with liger-kernel")
+        return False
+    try:
+        import liger_kernel  # noqa: F401
+    except ImportError:
+        _log("liger-kernel not installed; training without Liger kernels")
+        return False
+    return True
+
+
+def _tokenized_cache_ready(max_length: int, train_rows: int, eval_rows: int) -> bool:
+    if not TOKENIZED_CACHE_META.is_file() or not TOKENIZED_CACHE_DONE.is_file():
+        return False
+    train_dir = TOKENIZED_CACHE_DIR / "train"
+    eval_dir = TOKENIZED_CACHE_DIR / "eval"
+    if not (train_dir / "dataset_info.json").is_file():
+        return False
+    if not (eval_dir / "dataset_info.json").is_file():
+        return False
+    try:
+        meta = json.loads(TOKENIZED_CACHE_META.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    return (
+        meta.get("max_length") == max_length
+        and meta.get("train_rows") == train_rows
+        and meta.get("eval_rows") == eval_rows
+        and meta.get("loss_mode") == "last_completion_only"
+        and meta.get("columns") == ["input_ids", "completion_mask"]
+    )
+
+
+def _write_tokenized_cache_meta(max_length: int, train_rows: int, eval_rows: int) -> None:
+    TOKENIZED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    meta = {
+        "max_length": max_length,
+        "train_rows": train_rows,
+        "eval_rows": eval_rows,
+        "loss_mode": "last_completion_only",
+        "completion_only_loss": True,
+        "assistant_only_loss": False,
+        "columns": ["input_ids", "completion_mask"],
+    }
+    TOKENIZED_CACHE_META.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+
+def _chat_template_token_ids(
+    tokenizer,
+    messages: list[dict[str, str]],
+    *,
+    add_generation_prompt: bool,
+) -> list[int]:
+    ids = tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=add_generation_prompt,
+        return_dict=False,
+    )
+    if isinstance(ids, dict):
+        return ids["input_ids"]
+    return ids
+
+
+def _aligned_prompt_prefix_len(prefix_ids: list[int], full_ids: list[int]) -> int:
+    n = 0
+    for prefix_id, full_id in zip(prefix_ids, full_ids, strict=False):
+        if prefix_id != full_id:
+            break
+        n += 1
+    return n
+
+
+def _tokenize_prompt_completion_row(
+    tokenizer,
+    prompt: list[dict[str, str]],
+    completion: list[dict[str, str]],
+) -> dict[str, list[int]]:
+    """Tokenize once and align completion_mask to the shared token prefix."""
+    prefix_ids = _chat_template_token_ids(tokenizer, prompt, add_generation_prompt=True)
+    full_ids = _chat_template_token_ids(
+        tokenizer,
+        prompt + completion,
+        add_generation_prompt=False,
+    )
+    prefix_len = _aligned_prompt_prefix_len(prefix_ids, full_ids)
+    completion_mask = [0] * prefix_len + [1] * (len(full_ids) - prefix_len)
+    return {"input_ids": full_ids, "completion_mask": completion_mask}
+
+
+def _build_tokenized_dataset(
+    dataset: Dataset,
+    tokenizer,
+    *,
+    num_proc: int,
+    desc: str,
+) -> Dataset:
+    def tokenize_row(example: dict) -> dict[str, list[int]]:
+        return _tokenize_prompt_completion_row(tokenizer, example["prompt"], example["completion"])
+
+    return dataset.map(
+        tokenize_row,
+        num_proc=num_proc,
+        remove_columns=dataset.column_names,
+        desc=desc,
+    )
+
+
+def _wait_for_tokenized_cache(
+    max_length: int,
+    train_rows: int,
+    eval_rows: int,
+    timeout_s: int = 7200,
+) -> None:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if _tokenized_cache_ready(max_length, train_rows, eval_rows):
+            return
+        time.sleep(2)
+    raise TimeoutError(f"Timed out waiting for tokenized cache at {TOKENIZED_CACHE_DIR}")
+
+
+def _load_peft_model(model_name: str, lora_config: LoraConfig, attn_implementation: str) -> torch.nn.Module:
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        dtype=torch.bfloat16,
+        attn_implementation=attn_implementation,
+        trust_remote_code=False,
+        low_cpu_mem_usage=True,
+        device_map=None,
+    )
+    model = get_peft_model(model, lora_config)
+    model.config.use_cache = False
+    if hasattr(model, "enable_input_require_grads"):
+        model.enable_input_require_grads()
+    return model
+
+
+def _ensure_tokenized_datasets(
+    train_dataset: Dataset,
+    eval_dataset: Dataset,
+    tokenizer,
+    max_length: int,
+    num_proc: int,
+) -> tuple[Dataset, Dataset]:
+    """Rank-0-only tokenization; other ranks poll for a .done marker before loading."""
+    train_rows = len(train_dataset)
+    eval_rows = len(eval_dataset)
+
+    if _tokenized_cache_ready(max_length, train_rows, eval_rows):
+        _log(f"Loading tokenized dataset from {TOKENIZED_CACHE_DIR}")
+        return (
+            Dataset.load_from_disk(str(TOKENIZED_CACHE_DIR / "train")),
+            Dataset.load_from_disk(str(TOKENIZED_CACHE_DIR / "eval")),
+        )
+
+    if STATE.is_main_process:
+        _log("Rank 0: tokenizing datasets (one-time, ~1-2 min)...")
+        if TOKENIZED_CACHE_DIR.exists():
+            shutil.rmtree(TOKENIZED_CACHE_DIR)
+        TOKENIZED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+        train_tokenized = _build_tokenized_dataset(
+            train_dataset,
+            tokenizer,
+            num_proc=num_proc,
+            desc="Tokenizing train dataset",
+        )
+        eval_tokenized = _build_tokenized_dataset(
+            eval_dataset,
+            tokenizer,
+            num_proc=num_proc,
+            desc="Tokenizing eval dataset",
+        )
+        train_tokenized.save_to_disk(str(TOKENIZED_CACHE_DIR / "train"))
+        eval_tokenized.save_to_disk(str(TOKENIZED_CACHE_DIR / "eval"))
+        _write_tokenized_cache_meta(max_length, train_rows, eval_rows)
+        TOKENIZED_CACHE_DONE.write_text("ok", encoding="utf-8")
+        _log(f"Saved tokenized dataset to {TOKENIZED_CACHE_DIR}")
+        del train_tokenized, eval_tokenized
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    else:
+        _log_all("Waiting for rank 0 to finish tokenizing...")
+        _wait_for_tokenized_cache(max_length, train_rows, eval_rows)
+
+    STATE.wait_for_everyone()
+    _log_all(f"Loading tokenized dataset from {TOKENIZED_CACHE_DIR}")
+    return (
+        Dataset.load_from_disk(str(TOKENIZED_CACHE_DIR / "train")),
+        Dataset.load_from_disk(str(TOKENIZED_CACHE_DIR / "eval")),
+    )
+
+
+def _resolve_optimizer() -> str:
+    if STATE.distributed_type == DistributedType.DEEPSPEED:
+        return "adamw_torch"
+    import inspect
+
+    if "fused" in inspect.signature(torch.optim.AdamW.__init__).parameters:
+        return "adamw_torch_fused"
+    return "adamw_torch"
+
+
+def _is_distributed() -> bool:
+    return STATE.distributed_type in {DistributedType.MULTI_GPU, DistributedType.DEEPSPEED}
+
+
+def _init_cuda_for_rank() -> None:
+    if not torch.cuda.is_available():
+        return
+    local_rank = STATE.local_process_index
+    torch.cuda.set_device(local_rank)
+    _ = torch.cuda.device_count()
+    torch.cuda.synchronize(local_rank)
+
+
+def _log_trainable_parameter_ratio(model: torch.nn.Module) -> None:
+    total_params = sum(param.numel() for param in model.parameters())
+    trainable_params = sum(param.numel() for param in model.parameters() if param.requires_grad)
+    if total_params == 0:
+        _log("Trainable params: 0 / 0 (0.00%)")
+        return
+    ratio = 100.0 * trainable_params / total_params
+    _log(f"Trainable params: {trainable_params:,} / {total_params:,} ({ratio:.4f}%)")
+
+
+def sft_train() -> None:
+    hp = HYPERPARAMS
+    max_length = hp["max_length"]
+    world_size = STATE.num_processes
+
+    _init_cuda_for_rank()
+    attn_implementation = _resolve_attn_implementation()
+    _log(f"Attention backend: {attn_implementation}")
+    _log(
+        f"Distributed: {STATE.distributed_type} "
+        f"(world_size={world_size}, local_rank={STATE.local_process_index})"
+    )
+
+    _log("\n[1/5] Loading tokenizer...")
+    tokenizer = AutoTokenizer.from_pretrained(
+        MODEL_NAME,
+        use_fast=True,
+        trust_remote_code=False,
+    )
+    if not tokenizer.pad_token:
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.padding_side = "right"
+    tokenizer.truncation_side = "left"
+
+    _log("\n[2/5] Loading dataset...")
+    dataset = load_or_build_dataset(tokenizer, max_length)
+    split = dataset.train_test_split(test_size=0.05, seed=42)
+    train_dataset = split["train"]
+    eval_dataset = split["test"]
+    _log(f"Train: {len(train_dataset)}, Eval: {len(eval_dataset)}")
+
+    per_device_batch = hp["per_device_batch"]
+    per_device_eval_batch = hp.get("per_device_eval_batch", per_device_batch)
+    grad_accum = hp["grad_accum"]
+    effective_batch = per_device_batch * grad_accum * world_size
+    num_epochs = hp["num_epochs"]
+    total_steps = max(1, (len(train_dataset) // effective_batch)) * num_epochs
+    warmup_steps = max(1, int(total_steps * hp["warmup_ratio"]))
+    dataset_num_proc = hp["dataset_num_proc"]
+    dataloader_num_workers = hp.get("dataloader_num_workers", 0)
+    optim = _resolve_optimizer()
+    use_liger = _resolve_use_liger_kernel(hp.get("use_liger_kernel", False))
+    assistant_only_loss = hp.get("assistant_only_loss", False)
+    completion_only_loss = hp.get("completion_only_loss", True)
+    packing = hp.get("packing", False)
+
+    _log(f"\n{'=' * 50}")
+    _log("TRAINING CONFIGURATION")
+    _log(f"{'=' * 50}")
+    _log(f"Training samples: {len(train_dataset)}")
+    _log(f"Eval samples: {len(eval_dataset)}")
+    _log(f"World size (GPUs): {world_size}")
+    _log(f"Per-device train batch: {per_device_batch}")
+    _log(f"Per-device eval batch: {per_device_eval_batch}")
+    _log(f"Gradient accumulation: {grad_accum}")
+    _log(f"Effective batch size: {effective_batch}")
+    _log(f"Epochs: {num_epochs}, total steps: {total_steps}, warmup: {warmup_steps}")
+    _log(f"Learning rate: {hp['learning_rate']}")
+    _log(f"Max sequence length: {max_length}")
+    _log(f"Completion-only loss (last assistant turn): {completion_only_loss}")
+    _log(f"Assistant-only loss (all assistant turns): {assistant_only_loss}")
+    _log(f"Packing: {packing}")
+    _log(f"Liger kernel: {use_liger}")
+    _log(f"Loss type: {hp.get('loss_type', 'chunked_nll')}")
+    _log(f"Activation offloading: {hp.get('activation_offloading', False)}")
+    _log(f"Optimizer: {optim}")
+    _log(f"{'=' * 50}\n")
+
+    lora_config = LoraConfig(
+        r=hp["lora_r"],
+        lora_alpha=hp["lora_alpha"],
+        lora_dropout=hp["lora_dropout"],
+        bias="none",
+        task_type="CAUSAL_LM",
+        target_modules=[
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ],
+        use_rslora=True,
+    )
+
+    _log("\n[3/5] Setting up training arguments...")
+    training_args = SFTConfig(
+        output_dir=str(OUTPUT_DIR),
+        num_train_epochs=num_epochs,
+        learning_rate=hp["learning_rate"],
+        bf16=True,
+        per_device_train_batch_size=per_device_batch,
+        per_device_eval_batch_size=per_device_eval_batch,
+        gradient_accumulation_steps=grad_accum,
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+        max_length=max_length,
+        pad_to_multiple_of=8,
+        warmup_steps=warmup_steps,
+        lr_scheduler_type="cosine",
+        weight_decay=hp["weight_decay"],
+        max_grad_norm=hp["max_grad_norm"],
+        logging_steps=hp["logging_steps"],
+        eval_strategy="steps",
+        eval_steps=hp["eval_steps"],
+        save_strategy="steps",
+        save_steps=hp["save_steps"],
+        save_total_limit=hp["save_total_limit"],
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        dataset_num_proc=dataset_num_proc,
+        packing=packing,
+        assistant_only_loss=assistant_only_loss,
+        completion_only_loss=completion_only_loss,
+        loss_type=hp.get("loss_type", "chunked_nll"),
+        activation_offloading=hp.get("activation_offloading", False),
+        report_to="none",
+        ddp_find_unused_parameters=False,
+        use_liger_kernel=use_liger,
+        dataloader_num_workers=dataloader_num_workers,
+        dataloader_pin_memory=False,
+        dataloader_prefetch_factor=2 if dataloader_num_workers > 0 else None,
+        remove_unused_columns=False,
+        optim=optim,
+    )
+
+    _log("\n[3b/5] Ensuring tokenized datasets are cached...")
+    train_dataset, eval_dataset = _ensure_tokenized_datasets(
+        train_dataset,
+        eval_dataset,
+        tokenizer,
+        max_length,
+        dataset_num_proc,
+    )
+    training_args = replace(
+        training_args,
+        dataset_kwargs={"skip_prepare_dataset": True},
+        use_liger_kernel=False,
+    )
+    del dataset
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    _log("\n[4/5] Loading model and initializing SFTTrainer...")
+    model = _load_peft_model(MODEL_NAME, lora_config, attn_implementation)
+    trainer = SFTTrainer(
+        model=model,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        processing_class=tokenizer,
+        args=training_args,
+    )
+    _log_trainable_parameter_ratio(trainer.model)
+    trainable_tensors = sum(1 for param in trainer.model.parameters() if param.requires_grad)
+    _log_all(f"Trainable parameter tensors: {trainable_tensors}")
+    STATE.wait_for_everyone()
+
+    _log("\n[5/5] Starting training...")
+    resume_checkpoint = _latest_checkpoint(OUTPUT_DIR)
+    if resume_checkpoint:
+        _log(f"Resuming from {resume_checkpoint}")
+        trainer.train(resume_from_checkpoint=resume_checkpoint)
+    else:
+        _log("No checkpoint found, starting fresh")
+        trainer.train()
+
+    save_path = OUTPUT_DIR / "final"
+    trainer.save_model(save_path)
+    if STATE.is_main_process:
+        tokenizer.save_pretrained(save_path)
+        _log(f"LoRA adapter saved to {save_path}")
+
+    STATE.wait_for_everyone()
+    if not STATE.is_main_process:
+        return
+
+    _log("\nMerging LoRA adapters for production...")
+    try:
+        merge_base = AutoModelForCausalLM.from_pretrained(
+            MODEL_NAME,
+            dtype=torch.bfloat16,
+            attn_implementation=_resolve_attn_implementation(),
+            trust_remote_code=False,
+            device_map="auto",
+            low_cpu_mem_usage=True,
+        )
+        merged_model = PeftModel.from_pretrained(merge_base, save_path)
+        merged_model = merged_model.merge_and_unload()
+        merge_path = OUTPUT_DIR / "merged"
+        merged_model.save_pretrained(
+            merge_path,
+            max_shard_size="4GB",
+            safe_serialization=True,
+        )
+        tokenizer.save_pretrained(merge_path)
+        _log(f"Merged model saved to {merge_path}")
+    except Exception as exc:
+        _log(f"Could not merge adapters: {exc}")
+        _log("LoRA adapters are still saved in final/")
+
+
+if __name__ == "__main__":
+    sft_train()

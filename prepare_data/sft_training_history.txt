@@ -1,0 +1,141 @@
+((.venv) ) administrator@DESKTOP-5J8OMKU:~/workspace/albedo/sft$ ./launch_ddp.sh
+WSL networking mode: nat
+Launching SFT DDP (MASTER_ADDR=172.22.32.105 MASTER_PORT=29500)...
+Attention backend: flash_attention_2
+Distributed: DistributedType.MULTI_GPU (world_size=2, local_rank=0)
+
+[1/5] Loading tokenizer...
+[rank 1] Waiting for rank 0 to build dataset cache...
+
+[2/5] Loading dataset...
+Dataset: 7827 all, 7827 kept, 0 bad format, 436 truncated to max_length (8192), longest=15799 tokens
+Saving the dataset (1/1 shards): 100%|███████████████████████████████████| 7827/7827 [00:00<00:00, 60940.93 examples/s]
+Saved dataset cache to cache/sft/dataset_cache
+Train: 7435, Eval: 392
+
+==================================================
+TRAINING CONFIGURATION
+==================================================
+Training samples: 7435
+Eval samples: 392
+World size (GPUs): 2
+Per-device train batch: 1
+Per-device eval batch: 1
+Gradient accumulation: 4
+Effective batch size: 8
+Epochs: 2, total steps: 1858, warmup: 92
+Learning rate: 5e-06
+Max sequence length: 8192
+Completion-only loss (last assistant turn): True
+Assistant-only loss (all assistant turns): False
+Packing: False
+Liger kernel: False
+Loss type: chunked_nll
+Activation offloading: True
+Optimizer: adamw_torch_fused
+==================================================
+
+
+[3/5] Setting up training arguments...
+
+[3b/5] Ensuring tokenized datasets are cached...
+Rank 0: tokenizing datasets (one-time, ~1-2 min)...
+[rank 1] Waiting for rank 0 to finish tokenizing...
+Tokenizing train dataset (num_proc=8): 100%|███████████████████████████████| 7435/7435 [00:52<00:00, 141.47 examples/s]
+Tokenizing eval dataset (num_proc=8): 100%|███████████████████████████████████| 392/392 [00:22<00:00, 17.38 examples/s]
+Saving the dataset (1/1 shards): 100%|███████████████████████████████████| 7435/7435 [00:00<00:00, 27742.38 examples/s]
+Saving the dataset (1/1 shards): 100%|█████████████████████████████████████| 392/392 [00:00<00:00, 20868.24 examples/s]
+Saved tokenized dataset to cache/sft/dataset_cache/tokenized
+[rank 0] Loading tokenized dataset from cache/sft/dataset_cache/tokenized
+[rank 1] Loading tokenized dataset from cache/sft/dataset_cache/tokenized
+
+[4/5] Loading model and initializing SFTTrainer...
+Loading weights: 100%|█████████████████████████████████████████████████████████████| 399/399 [00:00<00:00, 1768.98it/s]
+Loading weights: 100%|█████████████████████████████████████████████████████████████| 399/399 [00:00<00:00, 1826.84it/s]
+Trainable params: 16,515,072 / 4,038,983,168 (0.4089%)
+[rank 0] Trainable parameter tensors: 504
+[rank 1] Trainable parameter tensors: 504
+
+[5/5] Starting training...
+No checkpoint found, starting fresh
+[transformers] The tokenizer has new PAD/BOS/EOS tokens that differ from the model config and generation config. The model config and generation config were aligned accordingly, being updated with the tokenizer's values. Updated tokens: {'bos_token_id': None, 'pad_token_id': 151645}.
+[transformers] The tokenizer has new PAD/BOS/EOS tokens that differ from the model config and generation config. The model config and generation config were aligned accordingly, being updated with the tokenizer's values. Updated tokens: {'bos_token_id': None, 'pad_token_id': 151645}.
+{'loss': '1.717', 'grad_norm': '8.334', 'learning_rate': '4.891e-07', 'entropy': '0.7826', 'num_tokens': '3.094e+05', 'mean_token_accuracy': '0.6917', 'epoch': '0.01076'}
+{'loss': '1.778', 'grad_norm': '7.086', 'learning_rate': '1.033e-06', 'entropy': '0.7839', 'num_tokens': '5.595e+05', 'mean_token_accuracy': '0.686', 'epoch': '0.02152'}
+{'loss': '1.648', 'grad_norm': '6.865', 'learning_rate': '1.576e-06', 'entropy': '0.807', 'num_tokens': '8.473e+05', 'mean_token_accuracy': '0.6948', 'epoch': '0.03228'}
+{'loss': '1.719', 'grad_norm': '6.005', 'learning_rate': '2.12e-06', 'entropy': '0.7686', 'num_tokens': '1.125e+06', 'mean_token_accuracy': '0.6865', 'epoch': '0.04303'}
+{'loss': '1.639', 'grad_norm': '5.3', 'learning_rate': '2.663e-06', 'entropy': '0.8059', 'num_tokens': '1.419e+06', 'mean_token_accuracy': '0.695', 'epoch': '0.05379'}
+{'eval_loss': '1.614', 'eval_runtime': '111.3', 'eval_samples_per_second': '3.522', 'eval_steps_per_second': '1.761', 'eval_entropy': '0.8411', 'eval_num_tokens': '1.419e+06', 'eval_mean_token_accuracy': '0.6981', 'epoch': '0.05379'}
+  3%|██                                                                            | 50/1860 [09:59<4:43:11,  9.39s/it]/home/administrator/workspace/albedo/.venv/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py:4876: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  warnings.warn(  # warn only once
+{'loss': '1.515', 'grad_norm': '4.995', 'learning_rate': '3.207e-06', 'entropy': '0.8439', 'num_tokens': '1.703e+06', 'mean_token_accuracy': '0.7065', 'epoch': '0.06455'}
+{'loss': '1.488', 'grad_norm': '3.934', 'learning_rate': '3.75e-06', 'entropy': '0.9119', 'num_tokens': '2.012e+06', 'mean_token_accuracy': '0.6851', 'epoch': '0.07531'}
+{'loss': '1.183', 'grad_norm': '3.334', 'learning_rate': '4.293e-06', 'entropy': '0.9438', 'num_tokens': '2.314e+06', 'mean_token_accuracy': '0.7204', 'epoch': '0.08607'}
+{'loss': '1.095', 'grad_norm': '3.362', 'learning_rate': '4.837e-06', 'entropy': '1.035', 'num_tokens': '2.616e+06', 'mean_token_accuracy': '0.7134', 'epoch': '0.09683'}
+{'loss': '0.9121', 'grad_norm': '2.478', 'learning_rate': '5e-06', 'entropy': '0.9893', 'num_tokens': '2.911e+06', 'mean_token_accuracy': '0.7429', 'epoch': '0.1076'}
+{'eval_loss': '0.9368', 'eval_runtime': '111.8', 'eval_samples_per_second': '3.507', 'eval_steps_per_second': '1.753', 'eval_entropy': '1.007', 'eval_num_tokens': '2.911e+06', 'eval_mean_token_accuracy': '0.7424', 'epoch': '0.1076'}
+  5%|████▏                                                                        | 100/1860 [20:16<4:53:20, 10.00s/it]/home/administrator/workspace/albedo/.venv/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py:4876: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  warnings.warn(  # warn only once
+{'loss': '0.8661', 'grad_norm': '2.904', 'learning_rate': '4.999e-06', 'entropy': '0.9615', 'num_tokens': '3.221e+06', 'mean_token_accuracy': '0.7509', 'epoch': '0.1183'}
+{'loss': '0.8435', 'grad_norm': '2.413', 'learning_rate': '4.997e-06', 'entropy': '0.9181', 'num_tokens': '3.5e+06', 'mean_token_accuracy': '0.7475', 'epoch': '0.1291'}
+{'loss': '0.7544', 'grad_norm': '3.153', 'learning_rate': '4.995e-06', 'entropy': '0.8915', 'num_tokens': '3.8e+06', 'mean_token_accuracy': '0.7697', 'epoch': '0.1399'}
+{'loss': '0.7137', 'grad_norm': '2.391', 'learning_rate': '4.991e-06', 'entropy': '0.8575', 'num_tokens': '4.09e+06', 'mean_token_accuracy': '0.7741', 'epoch': '0.1506'}
+{'loss': '0.7449', 'grad_norm': '2.153', 'learning_rate': '4.987e-06', 'entropy': '0.7994', 'num_tokens': '4.415e+06', 'mean_token_accuracy': '0.7674', 'epoch': '0.1614'}
+{'eval_loss': '0.7428', 'eval_runtime': '112.1', 'eval_samples_per_second': '3.498', 'eval_steps_per_second': '1.749', 'eval_entropy': '0.7855', 'eval_num_tokens': '4.415e+06', 'eval_mean_token_accuracy': '0.7716', 'epoch': '0.1614'}
+  8%|██████▏                                                                      | 150/1860 [30:32<4:58:59, 10.49s/it]/home/administrator/workspace/albedo/.venv/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py:4876: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  warnings.warn(  # warn only once
+{'loss': '0.7463', 'grad_norm': '2.856', 'learning_rate': '4.982e-06', 'entropy': '0.7643', 'num_tokens': '4.714e+06', 'mean_token_accuracy': '0.7676', 'epoch': '0.1721'}
+{'loss': '0.7095', 'grad_norm': '1.936', 'learning_rate': '4.977e-06', 'entropy': '0.7575', 'num_tokens': '5.009e+06', 'mean_token_accuracy': '0.7716', 'epoch': '0.1829'}
+{'loss': '0.6904', 'grad_norm': '3.836', 'learning_rate': '4.97e-06', 'entropy': '0.7571', 'num_tokens': '5.35e+06', 'mean_token_accuracy': '0.7751', 'epoch': '0.1937'}
+{'loss': '0.6258', 'grad_norm': '2.27', 'learning_rate': '4.963e-06', 'entropy': '0.6832', 'num_tokens': '5.666e+06', 'mean_token_accuracy': '0.7922', 'epoch': '0.2044'}
+{'loss': '0.6574', 'grad_norm': '2.326', 'learning_rate': '4.955e-06', 'entropy': '0.6657', 'num_tokens': '5.964e+06', 'mean_token_accuracy': '0.7882', 'epoch': '0.2152'}
+{'eval_loss': '0.6955', 'eval_runtime': '112.6', 'eval_samples_per_second': '3.481', 'eval_steps_per_second': '1.74', 'eval_entropy': '0.684', 'eval_num_tokens': '5.964e+06', 'eval_mean_token_accuracy': '0.7793', 'epoch': '0.2152'}
+ 11%|████████▎                                                                    | 200/1860 [41:03<4:34:30,  9.92s/it]/home/administrator/workspace/albedo/.venv/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py:4876: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  warnings.warn(  # warn only once
+{'loss': '0.6656', 'grad_norm': '2.101', 'learning_rate': '4.946e-06', 'entropy': '0.6573', 'num_tokens': '6.246e+06', 'mean_token_accuracy': '0.7848', 'epoch': '0.2259'}
+{'loss': '0.6812', 'grad_norm': '2.396', 'learning_rate': '4.937e-06', 'entropy': '0.7141', 'num_tokens': '6.528e+06', 'mean_token_accuracy': '0.7762', 'epoch': '0.2367'}
+{'loss': '0.6976', 'grad_norm': '2.853', 'learning_rate': '4.926e-06', 'entropy': '0.7013', 'num_tokens': '6.835e+06', 'mean_token_accuracy': '0.779', 'epoch': '0.2474'}
+{'loss': '0.6492', 'grad_norm': '4.076', 'learning_rate': '4.915e-06', 'entropy': '0.6928', 'num_tokens': '7.161e+06', 'mean_token_accuracy': '0.7859', 'epoch': '0.2582'}
+{'loss': '0.6842', 'grad_norm': '2.5', 'learning_rate': '4.903e-06', 'entropy': '0.6842', 'num_tokens': '7.502e+06', 'mean_token_accuracy': '0.7808', 'epoch': '0.269'}
+{'eval_loss': '0.6677', 'eval_runtime': '111.8', 'eval_samples_per_second': '3.507', 'eval_steps_per_second': '1.753', 'eval_entropy': '0.6641', 'eval_num_tokens': '7.502e+06', 'eval_mean_token_accuracy': '0.7842', 'epoch': '0.269'}
+ 13%|██████████▎                                                                  | 250/1860 [51:37<4:44:36, 10.61s/it]/home/administrator/workspace/albedo/.venv/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py:4876: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  warnings.warn(  # warn only once
+{'loss': '0.6239', 'grad_norm': '3.112', 'learning_rate': '4.891e-06', 'entropy': '0.6332', 'num_tokens': '7.778e+06', 'mean_token_accuracy': '0.7936', 'epoch': '0.2797'}
+{'loss': '0.6575', 'grad_norm': '2.109', 'learning_rate': '4.877e-06', 'entropy': '0.6637', 'num_tokens': '8.073e+06', 'mean_token_accuracy': '0.7872', 'epoch': '0.2905'}
+{'loss': '0.6144', 'grad_norm': '2.631', 'learning_rate': '4.863e-06', 'entropy': '0.6582', 'num_tokens': '8.391e+06', 'mean_token_accuracy': '0.7921', 'epoch': '0.3012'}
+{'loss': '0.6731', 'grad_norm': '2.553', 'learning_rate': '4.848e-06', 'entropy': '0.6301', 'num_tokens': '8.734e+06', 'mean_token_accuracy': '0.7813', 'epoch': '0.312'}
+{'loss': '0.625', 'grad_norm': '2.583', 'learning_rate': '4.833e-06', 'entropy': '0.6681', 'num_tokens': '9.057e+06', 'mean_token_accuracy': '0.791', 'epoch': '0.3228'}
+{'eval_loss': '0.6512', 'eval_runtime': '111.6', 'eval_samples_per_second': '3.513', 'eval_steps_per_second': '1.756', 'eval_entropy': '0.6644', 'eval_num_tokens': '9.057e+06', 'eval_mean_token_accuracy': '0.7879', 'epoch': '0.3228'}
+ 16%|████████████                                                               | 300/1860 [1:02:11<4:23:14, 10.12s/it]/home/administrator/workspace/albedo/.venv/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py:4876: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  warnings.warn(  # warn only once
+{'loss': '0.6116', 'grad_norm': '3.132', 'learning_rate': '4.816e-06', 'entropy': '0.6539', 'num_tokens': '9.363e+06', 'mean_token_accuracy': '0.7866', 'epoch': '0.3335'}
+{'loss': '0.661', 'grad_norm': '2.468', 'learning_rate': '4.799e-06', 'entropy': '0.6528', 'num_tokens': '9.676e+06', 'mean_token_accuracy': '0.7822', 'epoch': '0.3443'}
+{'loss': '0.5999', 'grad_norm': '2.405', 'learning_rate': '4.782e-06', 'entropy': '0.6181', 'num_tokens': '9.99e+06', 'mean_token_accuracy': '0.803', 'epoch': '0.355'}
+{'loss': '0.6429', 'grad_norm': '2.264', 'learning_rate': '4.763e-06', 'entropy': '0.6723', 'num_tokens': '1.029e+07', 'mean_token_accuracy': '0.7936', 'epoch': '0.3658'}
+{'loss': '0.5918', 'grad_norm': '2.437', 'learning_rate': '4.744e-06', 'entropy': '0.6153', 'num_tokens': '1.058e+07', 'mean_token_accuracy': '0.798', 'epoch': '0.3765'}
+{'eval_loss': '0.6376', 'eval_runtime': '112.3', 'eval_samples_per_second': '3.49', 'eval_steps_per_second': '1.745', 'eval_entropy': '0.6459', 'eval_num_tokens': '1.058e+07', 'eval_mean_token_accuracy': '0.7905', 'epoch': '0.3765'}
+ 19%|██████████████                                                             | 350/1860 [1:12:35<4:33:00, 10.85s/it]/home/administrator/workspace/albedo/.venv/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py:4876: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  warnings.warn(  # warn only once
+{'loss': '0.5754', 'grad_norm': '2.308', 'learning_rate': '4.724e-06', 'entropy': '0.5939', 'num_tokens': '1.087e+07', 'mean_token_accuracy': '0.8058', 'epoch': '0.3873'}
+{'loss': '0.6141', 'grad_norm': '2.414', 'learning_rate': '4.703e-06', 'entropy': '0.6201', 'num_tokens': '1.118e+07', 'mean_token_accuracy': '0.7971', 'epoch': '0.3981'}
+{'loss': '0.6145', 'grad_norm': '2.41', 'learning_rate': '4.682e-06', 'entropy': '0.6099', 'num_tokens': '1.15e+07', 'mean_token_accuracy': '0.7939', 'epoch': '0.4088'}
+{'loss': '0.6635', 'grad_norm': '3.128', 'learning_rate': '4.66e-06', 'entropy': '0.6671', 'num_tokens': '1.179e+07', 'mean_token_accuracy': '0.7784', 'epoch': '0.4196'}
+{'loss': '0.5989', 'grad_norm': '2.143', 'learning_rate': '4.637e-06', 'entropy': '0.6051', 'num_tokens': '1.208e+07', 'mean_token_accuracy': '0.7972', 'epoch': '0.4303'}
+{'eval_loss': '0.6286', 'eval_runtime': '111.8', 'eval_samples_per_second': '3.506', 'eval_steps_per_second': '1.753', 'eval_entropy': '0.647', 'eval_num_tokens': '1.208e+07', 'eval_mean_token_accuracy': '0.7941', 'epoch': '0.4303'}
+ 22%|████████████████▏                                                          | 400/1860 [1:22:56<3:50:40,  9.48s/it]/home/administrator/workspace/albedo/.venv/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py:4876: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  warnings.warn(  # warn only once
+{'loss': '0.598', 'grad_norm': '2.178', 'learning_rate': '4.614e-06', 'entropy': '0.615', 'num_tokens': '1.239e+07', 'mean_token_accuracy': '0.8044', 'epoch': '0.4411'}
+{'loss': '0.6195', 'grad_norm': '2.427', 'learning_rate': '4.59e-06', 'entropy': '0.6511', 'num_tokens': '1.271e+07', 'mean_token_accuracy': '0.7905', 'epoch': '0.4519'}
+{'loss': '0.6225', 'grad_norm': '3.303', 'learning_rate': '4.565e-06', 'entropy': '0.5975', 'num_tokens': '1.299e+07', 'mean_token_accuracy': '0.7947', 'epoch': '0.4626'}
+{'loss': '0.5472', 'grad_norm': '2.405', 'learning_rate': '4.54e-06', 'entropy': '0.578', 'num_tokens': '1.328e+07', 'mean_token_accuracy': '0.8111', 'epoch': '0.4734'}
+{'loss': '0.5737', 'grad_norm': '2.076', 'learning_rate': '4.514e-06', 'entropy': '0.5743', 'num_tokens': '1.359e+07', 'mean_token_accuracy': '0.809', 'epoch': '0.4841'}
+{'eval_loss': '0.6229', 'eval_runtime': '112.5', 'eval_samples_per_second': '3.486', 'eval_steps_per_second': '1.743', 'eval_entropy': '0.6118', 'eval_num_tokens': '1.359e+07', 'eval_mean_token_accuracy': '0.7945', 'epoch': '0.4841'}
+ 24%|██████████████████▏                                                        | 450/1860 [1:33:19<4:03:45, 10.37s/it]/home/administrator/workspace/albedo/.venv/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py:4876: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  warnings.warn(  # warn only once
+{'loss': '0.5907', 'grad_norm': '2.488', 'learning_rate': '4.487e-06', 'entropy': '0.603', 'num_tokens': '1.389e+07', 'mean_token_accuracy': '0.8025', 'epoch': '0.4949'}
+{'loss': '0.6043', 'grad_norm': '2.528', 'learning_rate': '4.46e-06', 'entropy': '0.5975', 'num_tokens': '1.418e+07', 'mean_token_accuracy': '0.8019', 'epoch': '0.5056'}
+{'loss': '0.6528', 'grad_norm': '2.264', 'learning_rate': '4.432e-06', 'entropy': '0.624', 'num_tokens': '1.447e+07', 'mean_token_accuracy': '0.7832', 'epoch': '0.5164'}
+{'loss': '0.5644', 'grad_norm': '2.081', 'learning_rate': '4.403e-06', 'entropy': '0.5893', 'num_tokens': '1.477e+07', 'mean_token_accuracy': '0.8085', 'epoch': '0.5272'}
+{'loss': '0.5789', 'grad_norm': '2.753', 'learning_rate': '4.374e-06', 'entropy': '0.5872', 'num_tokens': '1.506e+07', 'mean_token_accuracy': '0.8012', 'epoch': '0.5379'}
+ 27%|████████████████████▏                                                      | 500/1860 [1:41:47<3:55:39, 10.40s/it]
+ 51%|████████████████████████████████████████▉                                        | 99/196 [00:56<01:01,  1.57it/s]

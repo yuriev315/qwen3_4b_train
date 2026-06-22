@@ -1,0 +1,8 @@
+{
+    "zero_optimization": {
+        "stage": 3,
+        "offload_optimizer": {"device": "cpu"},
+        "offload_param": {"device": "cpu"}
+    },
+    "bf16": {"enabled": true}
+}
